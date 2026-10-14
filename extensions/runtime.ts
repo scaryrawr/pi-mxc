@@ -1,4 +1,5 @@
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { finished } from "node:stream/promises";
 
@@ -73,6 +74,7 @@ interface RequestOptions {
   command: string;
   cwd: string;
   timeout: number | undefined;
+  temporaryDirectory: string;
 }
 
 export function buildRequest({
@@ -81,6 +83,7 @@ export function buildRequest({
   command,
   cwd,
   timeout,
+  temporaryDirectory,
 }: RequestOptions): ContainerRequest {
   const timeoutMs =
     timeout === undefined ? config.timeoutMs : Math.min(config.timeoutMs, timeout * 1000);
@@ -100,7 +103,10 @@ export function buildRequest({
     timeoutMs: Math.ceil(timeoutMs),
     filesystem: {
       readonlyPaths: config.filesystem.readonlyPaths.map((path) => expandPath(path, cwd)),
-      readwritePaths: config.filesystem.readwritePaths.map((path) => expandPath(path, cwd)),
+      readwritePaths: [
+        ...config.filesystem.readwritePaths.map((path) => expandPath(path, cwd)),
+        temporaryDirectory,
+      ],
       deniedPaths: [...new Set(deniedPaths)],
     },
     network: {
@@ -108,7 +114,13 @@ export function buildRequest({
       ingress: { default: config.network.ingress, hostLoopback: config.network.hostLoopback },
     },
     ui: { disable: true, clipboard: "none", allowInputInjection: false },
-    environment: { ...config.environment },
+    environment: {
+      HOME: homedir(),
+      TMPDIR: temporaryDirectory,
+      TMP: temporaryDirectory,
+      TEMP: temporaryDirectory,
+      ...config.environment,
+    },
     inheritDefaultEnvironment: true,
   };
 }
@@ -130,41 +142,50 @@ export function createSandboxOperations({
     async exec(command, cwd, { onData, signal, timeout }) {
       if (signal?.aborted) throw new Error("aborted");
 
-      const child = await spawnProcess(buildRequest({ config, backend, command, cwd, timeout }));
-      const onAbort = () => child.kill();
+      const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-mxc-"));
 
       try {
-        const output = child.standardOutput;
-        const errors = child.standardError;
-        const drains: Promise<void>[] = [];
+        const child = await spawnProcess(
+          buildRequest({ config, backend, command, cwd, timeout, temporaryDirectory }),
+        );
 
-        for (const stream of [output, errors]) {
-          if (stream !== null) {
-            stream.on("data", onData);
-            drains.push(finished(stream, { cleanup: true }));
+        const onAbort = () => child.kill();
+
+        try {
+          const output = child.standardOutput;
+          const errors = child.standardError;
+          const drains: Promise<void>[] = [];
+
+          for (const stream of [output, errors]) {
+            if (stream !== null) {
+              stream.on("data", onData);
+              drains.push(finished(stream, { cleanup: true }));
+            }
           }
+
+          signal?.addEventListener("abort", onAbort, { once: true });
+
+          if (signal?.aborted) onAbort();
+
+          const [result] = await Promise.all([child.wait(), ...drains]);
+
+          for (const warning of child.warnings) {
+            onData(Buffer.from(`\n[MXC warning] ${warning}\n`));
+          }
+
+          if (signal?.aborted) throw new Error("aborted");
+
+          if (result.timedOut) {
+            throw new Error(`timeout:${Math.min(timeout ?? Infinity, config.timeoutMs / 1000)}`);
+          }
+
+          return { exitCode: result.exitCode };
+        } finally {
+          signal?.removeEventListener("abort", onAbort);
+          child.dispose();
         }
-
-        signal?.addEventListener("abort", onAbort, { once: true });
-
-        if (signal?.aborted) onAbort();
-
-        const [result] = await Promise.all([child.wait(), ...drains]);
-
-        for (const warning of child.warnings) {
-          onData(Buffer.from(`\n[MXC warning] ${warning}\n`));
-        }
-
-        if (signal?.aborted) throw new Error("aborted");
-
-        if (result.timedOut) {
-          throw new Error(`timeout:${Math.min(timeout ?? Infinity, config.timeoutMs / 1000)}`);
-        }
-
-        return { exitCode: result.exitCode };
       } finally {
-        signal?.removeEventListener("abort", onAbort);
-        child.dispose();
+        rmSync(temporaryDirectory, { recursive: true, force: true });
       }
     },
   };

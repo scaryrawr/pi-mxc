@@ -1,3 +1,6 @@
+import { existsSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
@@ -38,6 +41,55 @@ function testProcess({ timedOut = false, exitCode = 0 }: TestProcessOptions = {}
 }
 
 describe("MXC bash operations", () => {
+  it("uses the host home and a private writable temporary directory, then removes it", async () => {
+    let temporaryDirectory = "";
+
+    const operations = createSandboxOperations({
+      config: defaultConfig(),
+      backend: "seatbelt",
+      spawnProcess: async (request) => {
+        const environment = request.environment;
+
+        expect(environment?.HOME).toBe(homedir());
+        temporaryDirectory = environment?.TMPDIR ?? "";
+        expect(temporaryDirectory).not.toBe("");
+        expect(environment?.TMP).toBe(temporaryDirectory);
+        expect(environment?.TEMP).toBe(temporaryDirectory);
+        expect(request.filesystem?.readwritePaths).toContain(temporaryDirectory);
+
+        if (process.platform !== "win32") {
+          expect(statSync(temporaryDirectory).mode & 0o777).toBe(0o700);
+        }
+
+        writeFileSync(join(temporaryDirectory, "cache"), "temporary data");
+
+        return testProcess().child;
+      },
+    });
+
+    await operations.exec("git status", "/workspace", { onData() {} });
+    expect(existsSync(temporaryDirectory)).toBe(false);
+  });
+
+  it("preserves explicitly configured home and temporary paths", async () => {
+    const config = defaultConfig();
+
+    config.environment = { HOME: "/custom/home", TMPDIR: "/custom/tmp" };
+
+    const operations = createSandboxOperations({
+      config,
+      backend: "seatbelt",
+      spawnProcess: async (request) => {
+        expect(request.environment?.HOME).toBe("/custom/home");
+        expect(request.environment?.TMPDIR).toBe("/custom/tmp");
+
+        return testProcess().child;
+      },
+    });
+
+    await operations.exec("git status", "/workspace", { onData() {} });
+  });
+
   it("streams both outputs, exposes warnings, and returns the workload exit code", async () => {
     const process = testProcess({ exitCode: 7 });
     const chunks: Buffer[] = [];
@@ -61,17 +113,24 @@ describe("MXC bash operations", () => {
 
   it("reports a timeout as a failed command and releases the process", async () => {
     const process = testProcess({ timedOut: true });
+    let temporaryDirectory = "";
 
     const operations = createSandboxOperations({
       config: defaultConfig(),
       backend: "seatbelt",
-      spawnProcess: async () => process.child,
+      spawnProcess: async (request) => {
+        temporaryDirectory = request.environment?.TMPDIR ?? "";
+
+        return process.child;
+      },
     });
 
     await expect(
       operations.exec("sleep 10", "/workspace", { onData() {}, timeout: 1 }),
     ).rejects.toThrow("timeout:1");
     expect(process.isDisposed()).toBe(true);
+    expect(temporaryDirectory).not.toBe("");
+    expect(existsSync(temporaryDirectory)).toBe(false);
   });
 
   it("lets a caller shorten the timeout but not extend the configured cap", async () => {
@@ -123,11 +182,13 @@ describe("MXC bash operations", () => {
   it("kills a process if cancellation occurs while native spawning is pending", async () => {
     const controller = new AbortController();
     const process = testProcess();
+    let temporaryDirectory = "";
 
     const operations = createSandboxOperations({
       config: defaultConfig(),
       backend: "seatbelt",
-      spawnProcess: async () => {
+      spawnProcess: async (request) => {
+        temporaryDirectory = request.environment?.TMPDIR ?? "";
         controller.abort();
 
         return process.child;
@@ -139,13 +200,19 @@ describe("MXC bash operations", () => {
     ).rejects.toThrow("aborted");
     expect(process.isKilled()).toBe(true);
     expect(process.isDisposed()).toBe(true);
+    expect(temporaryDirectory).not.toBe("");
+    expect(existsSync(temporaryDirectory)).toBe(false);
   });
 
-  it("propagates native launch errors without executing anything locally", async () => {
+  it("cleans up temporary files on native launch errors without executing anything locally", async () => {
+    let temporaryDirectory = "";
+
     const operations = createSandboxOperations({
       config: defaultConfig(),
       backend: "seatbelt",
-      spawnProcess: async () => {
+      spawnProcess: async (request) => {
+        temporaryDirectory = request.environment?.TMPDIR ?? "";
+        expect(existsSync(temporaryDirectory)).toBe(true);
         throw new Error("backend unavailable");
       },
     });
@@ -153,5 +220,6 @@ describe("MXC bash operations", () => {
     await expect(operations.exec("echo hi", "/workspace", { onData() {} })).rejects.toThrow(
       "backend unavailable",
     );
+    expect(existsSync(temporaryDirectory)).toBe(false);
   });
 });

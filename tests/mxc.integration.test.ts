@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +72,7 @@ describe("real MXC containment", () => {
     expect(() => readFileSync(join(directory, "escape.txt"))).toThrow();
   });
 
-  it("reads Git identity from the default home grant without permitting changes", async () => {
+  it("supports local Git workflows using the host identity without permitting global config changes", async () => {
     const home = join(directory, "home");
     const path = join(home, ".gitconfig");
     const contents = "[user]\n\tname = Sandbox User\n\temail = sandbox@example.com\n";
@@ -77,8 +85,8 @@ describe("real MXC containment", () => {
     try {
       const config = defaultConfig();
 
-      config.environment.HOME = home;
       config.environment.GIT_CONFIG_NOSYSTEM = "1";
+
       const identity = await execute(
         "git config --global user.name && git config --global user.email",
         config,
@@ -88,6 +96,36 @@ describe("real MXC containment", () => {
       expect(identity.output).toContain("Sandbox User\n");
       expect(identity.output).toContain("sandbox@example.com\n");
 
+      const workflow = await execute(
+        `set -eu
+         git init --initial-branch=main repository
+         cd repository
+         printf 'original\\n' > tracked.txt
+         git add tracked.txt
+         git commit -m initial
+         git switch -c feature
+         printf 'changed\\n' > tracked.txt
+         git diff --exit-code && exit 1
+         git stash push -m saved
+         git stash pop
+         git add tracked.txt
+         git commit -m changed
+         git log -1 --format='%an <%ae>: %s'
+         git status --porcelain
+         git clone --bare . ../remote.git
+         git remote add origin ../remote.git
+         git push origin feature
+         git fetch origin
+         git clone ../remote.git ../clone
+         git -C ../clone show HEAD:tracked.txt`,
+        config,
+      );
+
+      expect(workflow.exitCode).toBe(0);
+      expect(workflow.output).toContain("Sandbox User <sandbox@example.com>: changed");
+      expect(workflow.output).toContain("changed\n");
+      expect(readFileSync(join(workspace, "clone", "tracked.txt"), "utf8")).toBe("changed\n");
+
       const update = await execute("git config --global user.name Changed", config);
 
       expect(update.exitCode).not.toBe(0);
@@ -96,6 +134,24 @@ describe("real MXC containment", () => {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
     }
+  }, 20000);
+
+  it("provides writable temporary storage without exposing other host temporary files", async () => {
+    const secret = join(directory, "temporary-secret.txt");
+
+    writeFileSync(secret, "host-temporary-secret");
+
+    const result = await execute(
+      `set -eu; file=$(mktemp); printf 'scratch-data' > "$file"; cat "$file"; printf '\\n%s\\n' "$TMPDIR"; cat '${secret}'`,
+    );
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.output).toContain("scratch-data");
+    expect(result.output).not.toContain("host-temporary-secret");
+    const temporaryDirectory = result.output.split("\n")[1];
+
+    expect(temporaryDirectory).toContain("pi-mxc-");
+    expect(existsSync(temporaryDirectory ?? "")).toBe(false);
   });
 
   it("denies an explicit secret even inside the writable workspace", async () => {
