@@ -20,7 +20,9 @@ For an agent bash call, the extension reads and validates the config, checks the
 
 Config and backend errors fail closed. No mutable initialization flag can accidentally select local execution after a native error. Each command captures its own config. Commands can run in parallel without sharing container handles.
 
-MXC's default environment plus explicitly configured values reach the child. Neither pi's session environment nor the host environment is forwarded. The request always selects an explicit native backend rather than relying on an ambiguous default containment type.
+The runtime sets `HOME` to the host home directory so Git can find the default read-only `~/.gitconfig` grant. Each execution also gets a private writable temporary directory through `TMPDIR`, `TMP`, and `TEMP`. This lets Git and Apple's Git launcher create temporary files without granting access to the host's entire temporary directory. The runtime removes the directory in a `finally` block, including on native launch errors. Separate executions do not share temporary storage.
+
+Explicitly configured environment values override these defaults. Other environment values come from MXC's default environment. Neither pi's session environment nor the rest of the host environment is forwarded. The request always selects an explicit native backend rather than relying on an ambiguous default containment type.
 
 ## Why one config
 

@@ -48,6 +48,20 @@ Changes apply to the next command, including direct file edits. A running comman
 
 See [Configuration reference](docs/configuration.md) for every field and command, or use [pi-mxc.example.json](pi-mxc.example.json) as a starting point.
 
+## Use Git in the sandbox
+
+Local Git commands use your host `HOME` and can read `~/.gitconfig` through the default read-only grant. Each command gets private writable temporary storage, including for Apple's Git launcher. Your other home files remain subject to the filesystem policy.
+
+For an existing config without the Git grant, run:
+
+```text
+/sandbox add readonly ~/.gitconfig
+```
+
+If Git uses config includes, an XDG config, or a global ignore file outside the workspace, add read-only grants for those files. For a linked worktree, grant read-write access to its external Git metadata directory. The extension does not automatically grant paths referenced by repository files.
+
+Remote fetch, push, and clone still require `/sandbox network allow`. SSH keys, credential helpers, and commit-signing tools need their own explicit access. `~/.ssh` and `~/.gnupg` are denied by default. A read-only grant does not override a denial. Host credential environment variables and SSH agent sockets are not forwarded automatically.
+
 ## Host requirements
 
 `auto` selects Seatbelt on macOS, Bubblewrap on Linux, and ProcessContainer on Windows. There is no fallback to a different backend.
@@ -71,7 +85,7 @@ npm run test:rpc
 
 `check` runs TypeScript native preview, type-aware Oxlint with the sibling extensions' vendored Anti-Slop rules, Oxfmt, and unit tests. `test:integration` runs actual MXC workloads and requires a usable native backend. It does not skip missing prerequisites. The live tests use Unix bash and `/usr/bin/curl`, so run them on macOS or Linux.
 
-The integration suite checks allowed and denied filesystem operations, symlink containment, environment isolation, loopback networking, shell quoting, exit status, timeout, and cancellation. It does not certify every backend or policy combination.
+The integration suite checks a local Git workflow, host Git identity, read-only global config, private temporary storage, allowed and denied filesystem operations, symlink containment, environment isolation, loopback networking, shell quoting, exit status, timeout, and cancellation. It does not certify every backend or policy combination.
 
 `test:rpc` requires Python 3 and an installed `pi` command. It starts an isolated pi instance with a temporary agent directory, drives `/sandbox` commands and the JSON editor, and checks actual config files and native user-bash execution. It makes no model calls.
 
