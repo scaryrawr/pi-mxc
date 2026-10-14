@@ -20,6 +20,7 @@ describe("sandbox configuration", () => {
 
     expect(config.enabled).toBe(true);
     expect(config.network).toEqual({ egress: "deny", ingress: "deny", hostLoopback: "deny" });
+    expect(config.filesystem.readonlyPaths).toEqual(["~/.gitconfig"]);
     expect(config.filesystem.readwritePaths).toEqual(["."]);
   });
 
@@ -32,7 +33,7 @@ describe("sandbox configuration", () => {
     writeConfig(config, path);
 
     expect(readConfig(path).enabled).toBe(false);
-    expect(readConfig(path).filesystem.readonlyPaths).toEqual(["/opt/tools"]);
+    expect(readConfig(path).filesystem.readonlyPaths).toEqual(["~/.gitconfig", "/opt/tools"]);
     expect(readFileSync(path, "utf8")).toContain('"enabled": false');
 
     if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);

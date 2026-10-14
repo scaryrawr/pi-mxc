@@ -51,7 +51,7 @@ export function defaultConfig(): SandboxConfig {
     shellPath: process.platform === "win32" ? "bash.exe" : "/bin/bash",
     timeoutMs: 120000,
     filesystem: {
-      readonlyPaths: [],
+      readonlyPaths: ["~/.gitconfig"],
       readwritePaths: ["."],
       deniedPaths: ["~/.ssh", "~/.aws", "~/.gnupg", "~/.azure"],
     },

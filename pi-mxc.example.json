@@ -4,7 +4,7 @@
   "shellPath": "/bin/bash",
   "timeoutMs": 120000,
   "filesystem": {
-    "readonlyPaths": [],
+    "readonlyPaths": ["~/.gitconfig"],
     "readwritePaths": ["."],
     "deniedPaths": ["~/.ssh", "~/.aws", "~/.gnupg", "~/.azure"]
   },

@@ -12,7 +12,7 @@ All fields in [the example](../pi-mxc.example.json) are required. Unknown fields
 | `backend`                   | `"auto"`                                                | `auto`, `seatbelt`, `bubblewrap`, or `processcontainer`. `auto` selects by host OS.                                           |
 | `shellPath`                 | `/bin/bash` on Unix, `bash.exe` on Windows              | Bash executable inside MXC. The extension supplies `--noprofile --norc -c`.                                                   |
 | `timeoutMs`                 | `120000`                                                | Positive integer maximum runtime. The bash tool's timeout in seconds can shorten this limit, but cannot lengthen it.          |
-| `filesystem.readonlyPaths`  | `[]`                                                    | Literal directory or file paths granted read access. Backend baseline system access still applies.                            |
+| `filesystem.readonlyPaths`  | `["~/.gitconfig"]`                                      | Literal directory or file paths granted read access. Backend baseline system access still applies.                            |
 | `filesystem.readwritePaths` | `["."]`                                                 | Literal directory or file paths granted read and write access.                                                                |
 | `filesystem.deniedPaths`    | SSH, AWS, GnuPG, and Azure config directories under `~` | Paths denied by MXC, including nested paths within a grant.                                                                   |
 | `network.egress`            | `"deny"`                                                | Default outbound traffic action, `allow` or `deny`.                                                                           |
@@ -21,6 +21,8 @@ All fields in [the example](../pi-mxc.example.json) are required. Unknown fields
 | `environment`               | `{}`                                                    | Explicit string-valued environment entries layered onto MXC's default environment. Host environment values are not forwarded. |
 
 Paths beginning with `~/` expand against the host home directory. Relative paths resolve against the command's working directory. Paths are not globs. Parent segments such as `..` are rejected because lexical resolution can change the meaning of a policy path containing symlinks. Native MXC performs its own path normalization and validation.
+
+The default read-only grant lets Git read `user.name`, `user.email`, and other settings from `~/.gitconfig` without granting write access. Existing config files keep their configured paths. To add this grant to an existing config, run `/sandbox add readonly ~/.gitconfig`.
 
 Every enabled request also denies the agent directory's `auth.json` and `pi-mxc.json`. Bash cannot remove these built-in denials through the config. Other local tools are outside this protection.
 

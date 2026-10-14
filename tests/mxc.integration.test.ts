@@ -64,6 +64,40 @@ describe("real MXC containment", () => {
     expect(() => readFileSync(join(directory, "escape.txt"))).toThrow();
   });
 
+  it("reads Git identity from the default home grant without permitting changes", async () => {
+    const home = join(directory, "home");
+    const path = join(home, ".gitconfig");
+    const contents = "[user]\n\tname = Sandbox User\n\temail = sandbox@example.com\n";
+    const originalHome = process.env.HOME;
+
+    mkdirSync(home);
+    writeFileSync(path, contents);
+    process.env.HOME = home;
+
+    try {
+      const config = defaultConfig();
+
+      config.environment.HOME = home;
+      config.environment.GIT_CONFIG_NOSYSTEM = "1";
+      const identity = await execute(
+        "git config --global user.name && git config --global user.email",
+        config,
+      );
+
+      expect(identity.exitCode).toBe(0);
+      expect(identity.output).toContain("Sandbox User\n");
+      expect(identity.output).toContain("sandbox@example.com\n");
+
+      const update = await execute("git config --global user.name Changed", config);
+
+      expect(update.exitCode).not.toBe(0);
+      expect(readFileSync(path, "utf8")).toBe(contents);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
   it("denies an explicit secret even inside the writable workspace", async () => {
     writeFileSync(join(workspace, "secret.txt"), "do-not-leak");
     const config = defaultConfig();

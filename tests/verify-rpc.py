@@ -106,6 +106,7 @@ def main():
             client.command("/sandbox init")
             initial = json.loads(config_path.read_text())
             assert initial["enabled"] is True
+            assert initial["filesystem"]["readonlyPaths"] == ["~/.gitconfig"]
             original = config_path.read_text()
             notifications = client.command("/sandbox init")
             assert any(n["notifyType"] == "error" for n in notifications)
@@ -113,9 +114,9 @@ def main():
 
             for _ in range(2):
                 client.command("/sandbox add readonly /opt/my  tools")
-            assert json.loads(config_path.read_text())["filesystem"]["readonlyPaths"] == ["/opt/my  tools"]
+            assert json.loads(config_path.read_text())["filesystem"]["readonlyPaths"] == ["~/.gitconfig", "/opt/my  tools"]
             client.command("/sandbox remove readonly /opt/my  tools")
-            assert json.loads(config_path.read_text())["filesystem"]["readonlyPaths"] == []
+            assert json.loads(config_path.read_text())["filesystem"]["readonlyPaths"] == ["~/.gitconfig"]
 
             client.command("/sandbox network allow")
             network = json.loads(config_path.read_text())["network"]
