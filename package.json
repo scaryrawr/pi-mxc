@@ -1,0 +1,57 @@
+{
+  "name": "pi-mxc",
+  "version": "0.1.0",
+  "description": "MXC-backed bash sandboxing for pi",
+  "keywords": [
+    "mxc",
+    "pi-package",
+    "sandbox"
+  ],
+  "license": "MIT",
+  "author": "Mike Wallio",
+  "files": [
+    "extensions",
+    "docs",
+    "README.md",
+    "pi-mxc.example.json"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsgo -p ./tsconfig.json",
+    "fmt": "oxfmt --ignore-path .gitignore ./extensions/*.ts ./tests/*.ts *.json *.md docs/*.md .oxlintrc.json .oxfmtrc.json",
+    "fmt:check": "oxfmt --check --ignore-path .gitignore ./extensions/*.ts ./tests/*.ts *.json *.md docs/*.md .oxlintrc.json .oxfmtrc.json",
+    "lint": "oxlint -c .oxlintrc.json --tsconfig ./tsconfig.json ./extensions/*.ts ./tests/*.ts",
+    "lint:fix": "oxlint -c .oxlintrc.json --fix --tsconfig ./tsconfig.json ./extensions/*.ts ./tests/*.ts",
+    "test": "vitest run --exclude '**/*.integration.test.ts'",
+    "test:integration": "vitest run tests/mxc.integration.test.ts",
+    "test:rpc": "python3 tests/verify-rpc.py",
+    "check": "npm run build && npm run lint && npm run fmt:check && npm test"
+  },
+  "dependencies": {
+    "@microsoft/mxc-sdk": "1.0.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@oxlint/plugins": "1.86.0",
+    "@types/node": "^26.6.4",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
+    "oxfmt": "^0.71.0",
+    "oxlint": "^1.86.0",
+    "oxlint-tsgolint": "^7.0.2003",
+    "typebox": "^1.3.34",
+    "vitest": "^5.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/mxc.ts"
+    ]
+  }
+}

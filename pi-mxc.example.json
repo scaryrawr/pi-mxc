@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "backend": "auto",
+  "shellPath": "/bin/bash",
+  "timeoutMs": 120000,
+  "filesystem": {
+    "readonlyPaths": [],
+    "readwritePaths": ["."],
+    "deniedPaths": ["~/.ssh", "~/.aws", "~/.gnupg", "~/.azure"]
+  },
+  "network": {
+    "egress": "deny",
+    "ingress": "deny",
+    "hostLoopback": "deny"
+  },
+  "environment": {}
+}
