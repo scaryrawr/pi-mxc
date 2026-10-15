@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -57,6 +57,25 @@ describe("real MXC containment", () => {
     expect(result.output).toContain("apostrophe: ' dollar: $HOME backtick: `id`\n");
     expect(result.output).toContain("error\n");
   });
+
+  it.runIf(process.platform === "darwin")(
+    "does not use the workspace as the macOS home or create Library directories there",
+    async () => {
+      const result = await execute(`/usr/bin/osascript -l JavaScript -e '
+        ObjC.import("Foundation");
+        const home = $.NSHomeDirectory();
+        const cache = $.NSSearchPathForDirectoriesInDomains($.NSCachesDirectory, $.NSUserDomainMask, true).firstObject;
+        console.log(ObjC.unwrap(home));
+        console.log(ObjC.unwrap(cache));
+        $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(cache, true, $.NSDictionary.dictionary, null);
+      '`);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain(`${homedir()}\n`);
+      expect(result.output).toContain(`${join(homedir(), "Library", "Caches")}\n`);
+      expect(existsSync(join(workspace, "Library"))).toBe(false);
+    },
+  );
 
   it("allows workspace writes but blocks reads and writes outside its policy", async () => {
     writeFileSync(join(directory, "outside.txt"), "outside-secret");
