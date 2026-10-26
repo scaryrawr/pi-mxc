@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -76,6 +76,47 @@ describe("real MXC containment", () => {
       expect(existsSync(join(workspace, "Library"))).toBe(false);
     },
   );
+
+  it("runs the host Node installation with only automatic tool grants", async () => {
+    const config = defaultConfig();
+
+    config.environment.PATH = [dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter);
+    const result = await execute("node -p 'process.version'", config);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output.trim()).toBe(process.version);
+  });
+
+  it("runs linked tools with their runtime files, keeps them read-only, and honors denials", async () => {
+    const installation = join(directory, "tool-installation");
+    const bin = join(installation, "bin");
+    const lib = join(installation, "lib");
+    const alias = join(directory, "tool-current");
+    const script = join(lib, "fixture-tool");
+    const data = join(lib, "data.txt");
+
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(lib);
+    writeFileSync(data, "tool-runtime-data");
+    writeFileSync(script, `#!/bin/bash\ncat '${data}'\n`, { mode: 0o755 });
+    symlinkSync("../lib/fixture-tool", join(bin, "fixture-tool"));
+    symlinkSync(installation, alias);
+    const config = defaultConfig();
+
+    config.environment.PATH = `${join(alias, "bin")}:/usr/bin:/bin`;
+    const result = await execute("fixture-tool", config);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("tool-runtime-data");
+    expect((await execute(`printf changed > '${data}'`, config)).exitCode).not.toBe(0);
+    expect(readFileSync(data, "utf8")).toBe("tool-runtime-data");
+
+    config.filesystem.deniedPaths.push(data);
+    const denied = await execute("fixture-tool", config);
+
+    expect(denied.exitCode).not.toBe(0);
+    expect(denied.output).not.toContain("tool-runtime-data");
+  });
 
   it("allows workspace writes but blocks reads and writes outside its policy", async () => {
     writeFileSync(join(directory, "outside.txt"), "outside-secret");
@@ -154,6 +195,66 @@ describe("real MXC containment", () => {
       else process.env.HOME = originalHome;
     }
   }, 20000);
+
+  it.each([false, true])(
+    "reads standard Git files without exposing sibling files, custom XDG=%s",
+    async (customXdg) => {
+      const home = join(directory, customXdg ? "git-custom-home" : "git-default-home");
+      const xdg = customXdg ? join(directory, "git-custom-xdg") : join(home, ".config");
+      const gitDirectory = join(xdg, "git");
+      const configPath = join(gitDirectory, "config");
+      const originalHome = process.env.HOME;
+      const originalXdg = process.env.XDG_CONFIG_HOME;
+
+      mkdirSync(gitDirectory, { recursive: true });
+      mkdirSync(home, { recursive: true });
+      writeFileSync(configPath, "[user]\n\tname = XDG User\n\temail = xdg@example.com\n");
+      writeFileSync(join(gitDirectory, "ignore"), "global-ignore.tmp\n");
+      writeFileSync(join(gitDirectory, "attributes"), "*.txt test-attribute=global\n");
+      writeFileSync(join(gitDirectory, "credentials"), "sibling-secret");
+      process.env.HOME = home;
+
+      if (customXdg) process.env.XDG_CONFIG_HOME = xdg;
+      else delete process.env.XDG_CONFIG_HOME;
+
+      try {
+        const config = defaultConfig();
+
+        config.environment.GIT_CONFIG_NOSYSTEM = "1";
+
+        const result = await execute(
+          `set -eu
+        git init --initial-branch=main ${customXdg ? "git-custom" : "git-default"}
+        cd ${customXdg ? "git-custom" : "git-default"}
+        git config --global user.name
+        printf ignored > global-ignore.tmp
+        printf tracked > tracked.txt
+        git check-ignore global-ignore.tmp
+        git check-attr test-attribute -- tracked.txt`,
+          config,
+        );
+
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain("XDG User\n");
+        expect(result.output).toContain("global-ignore.tmp\n");
+        expect(result.output).toContain("tracked.txt: test-attribute: global\n");
+        const sibling = await execute(`cat '${join(gitDirectory, "credentials")}'`, config);
+
+        expect(sibling.exitCode).not.toBe(0);
+        expect(sibling.output).not.toContain("sibling-secret");
+        expect((await execute("git config --global user.name Changed", config)).exitCode).not.toBe(
+          0,
+        );
+        expect(readFileSync(configPath, "utf8")).toContain("name = XDG User");
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+
+        if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = originalXdg;
+      }
+    },
+  );
 
   it("provides writable temporary storage without exposing other host temporary files", async () => {
     const secret = join(directory, "temporary-secret.txt");

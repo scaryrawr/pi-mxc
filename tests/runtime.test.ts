@@ -6,7 +6,11 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import { defaultConfig } from "../extensions/config.js";
-import { createSandboxOperations, type SandboxProcess } from "../extensions/runtime.js";
+import {
+  buildRequest,
+  createSandboxOperations,
+  type SandboxProcess,
+} from "../extensions/runtime.js";
 
 interface TestProcessOptions {
   timedOut?: boolean;
@@ -41,6 +45,74 @@ function testProcess({ timedOut = false, exitCode = 0 }: TestProcessOptions = {}
 }
 
 describe("MXC bash operations", () => {
+  it.each([
+    "curl -X POST https://example.com --data secret",
+    "git fetch origin",
+    "gh api user",
+    "git status; curl https://example.com",
+  ])("passes deny-by-default networking to MXC for %s", async (command) => {
+    const operations = createSandboxOperations({
+      config: defaultConfig(),
+      backend: "seatbelt",
+      spawnProcess: async (request) => {
+        expect(request.network).toEqual({
+          egress: { default: "deny" },
+          ingress: { default: "deny", hostLoopback: "deny" },
+        });
+
+        return testProcess().child;
+      },
+    });
+
+    await operations.exec(command, process.cwd(), { onData() {} });
+  });
+
+  it("passes the host PATH without forwarding other host environment values", () => {
+    const request = buildRequest({
+      config: defaultConfig(),
+      backend: "seatbelt",
+      command: "node --version",
+      cwd: process.cwd(),
+      timeout: undefined,
+      temporaryDirectory: "/private/sandbox-tmp",
+    });
+
+    expect(request.environment?.PATH).toBe(process.env.PATH);
+    expect(request.environment).not.toHaveProperty("SHELL");
+  });
+
+  it("retains explicit denials when inheriting tools and supports opting out", () => {
+    const config = defaultConfig();
+    const cwd = process.cwd();
+
+    config.environment.PATH = cwd;
+    config.filesystem.deniedPaths.push(cwd);
+
+    const options = {
+      config,
+      backend: "seatbelt",
+      command: "node --version",
+      cwd,
+      timeout: undefined,
+      temporaryDirectory: "/private/sandbox-tmp",
+    } satisfies Parameters<typeof buildRequest>[0];
+
+    const request = buildRequest(options);
+
+    expect(request.filesystem?.readonlyPaths).toContain(cwd);
+    expect(request.filesystem?.deniedPaths).toContain(cwd);
+    expect(request.environment?.PATH).toBe(cwd);
+
+    config.inheritHostPath = false;
+
+    const manual = buildRequest(options);
+
+    expect(manual.filesystem?.readonlyPaths).not.toContain(cwd);
+    expect(manual.environment?.PATH).toBe(cwd);
+    delete config.environment.PATH;
+    expect(buildRequest(options).environment).not.toHaveProperty("PATH");
+  });
+
   it("uses the host home and a private writable temporary directory, then removes it", async () => {
     let temporaryDirectory = "";
 

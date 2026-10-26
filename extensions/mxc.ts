@@ -9,34 +9,47 @@ import {
 
 import {
   defaultConfig,
+  expandPath,
   getConfigPath,
   parseConfig,
-  readConfig,
   serializeConfig,
   writeConfig,
   type SandboxConfig,
 } from "./config.js";
+import { createFooter } from "./footer.js";
+import { SandboxPolicy, type PolicyScope } from "./policy.js";
 import { checkBackend, createSandboxOperations } from "./runtime.js";
+import { getToolPolicy } from "./tools.js";
+
+const PERSISTENT_ACTIONS = ["on", "off", "edit", "add", "remove", "network"];
 
 const HELP = [
-  "/sandbox [status]                     Show config and backend availability",
-  "/sandbox init                         Create the default config, without overwriting",
-  "/sandbox on | off                     Persistently enable or disable bash sandboxing",
-  "/sandbox edit                         Edit and validate the JSON config",
-  "/sandbox path                         Show the config file location",
+  "/sandbox [status]                     Show effective config and session overrides",
+  "/sandbox init                         Create the saved default config, without overwriting",
+  "/sandbox on | off                     Enable or disable bash sandboxing for this session",
+  "/sandbox edit                         Edit and validate this session's policy",
+  "/sandbox path                         Show the saved config file location",
   "/sandbox add | remove <readonly | readwrite | deny> <path>",
-  "/sandbox network <allow | deny>       Change outbound access, not ingress or loopback",
+  "/sandbox network <allow | deny>       Change outbound access for this session",
+  "/sandbox reset                        Discard all session overrides",
+  "/sandbox --persist <on | off | edit | add | remove | network> ...",
+  "Changes are session-only unless --persist precedes the action. init always creates a saved config.",
+  "Session overrides clear on reset, reload, session switch, fork, or restart.",
   "Changes apply to the next bash command. Running commands keep their existing policy.",
 ].join("\n");
 
-function updateStatus(ctx: ExtensionContext): void {
+function updateStatus(ctx: ExtensionContext, policy: SandboxPolicy): void {
   try {
-    const config = readConfig();
-    const status = config.enabled ? `bash sandbox: ${checkBackend(config)}` : "bash sandbox: off";
+    const config = policy.read();
 
-    ctx.ui.setStatus("pi-mxc", status);
+    if (config.enabled) checkBackend(config);
+
+    ctx.ui.setStatus(
+      "pi-mxc",
+      `sandbox: ${config.enabled ? "on" : "off"}${policy.hasOverrides ? " (session)" : ""}`,
+    );
   } catch (error) {
-    ctx.ui.setStatus("pi-mxc", "bash sandbox: blocked");
+    ctx.ui.setStatus("pi-mxc", "sandbox: blocked");
     ctx.ui.notify(String(error), "error");
   }
 }
@@ -54,17 +67,42 @@ function pathList(config: SandboxConfig, name: string): string[] {
   }
 }
 
-async function handleCommand(args: string, ctx: ExtensionCommandContext): Promise<void> {
-  const [action = "status", ...remaining] = args.trim().split(/\s+/).filter(Boolean);
+async function handleCommand(
+  args: string,
+  ctx: ExtensionCommandContext,
+  policy: SandboxPolicy,
+): Promise<void> {
+  const scope: PolicyScope = /^--persist(?:\s|$)/.test(args.trim()) ? "persist" : "session";
+  const input = scope === "persist" ? args.trim().slice("--persist".length).trim() : args.trim();
+  const [action = "status", ...remaining] = input.split(/\s+/).filter(Boolean);
   const path = getConfigPath();
-  const rest = args.trim().slice(action.length).trim();
+  const rest = input.slice(action.length).trim();
+
+  if (scope === "persist" && !PERSISTENT_ACTIONS.includes(action)) {
+    throw new Error("--persist must precede on, off, edit, add, remove, or network.");
+  }
 
   switch (action) {
     case "status": {
-      const config = readConfig();
+      const config = policy.read();
       const backend = config.enabled ? checkBackend(config) : "disabled";
+      const tools = getToolPolicy(config);
+      const toolStatus = config.inheritHostPath === false ? "disabled" : "enabled";
 
-      ctx.ui.notify(`${path}\nBash sandbox: ${backend}\n${serializeConfig(config)}`, "info");
+      ctx.ui.notify(
+        [
+          `Saved defaults: ${path}`,
+          `Session overrides: ${policy.hasOverrides ? "active, not saved" : "none"}`,
+          `Bash sandbox: ${backend}`,
+          `Host PATH tools: ${toolStatus}`,
+          `PATH: ${config.environment.PATH ?? tools.environment.PATH ?? "MXC default"}`,
+          "Automatic read-only paths:",
+          ...tools.readonlyPaths,
+          "Effective policy:",
+          serializeConfig(config),
+        ].join("\n"),
+        "info",
+      );
 
       return;
     }
@@ -80,25 +118,61 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext): Promis
     case "init":
       if (existsSync(path)) throw new Error(`Config already exists: ${path}`);
       writeConfig(defaultConfig());
-      break;
-    case "edit": {
-      if (!ctx.hasUI) throw new Error(`Edit ${path} directly. /sandbox edit requires a UI.`);
+      updateStatus(ctx, policy);
+      ctx.ui.notify(`Created saved defaults at ${path}.`, "info");
 
-      const text = existsSync(path) ? readFileSync(path, "utf8") : serializeConfig(defaultConfig());
-      const edited = await ctx.ui.editor("MXC bash sandbox config", text);
+      return;
+    case "reset":
+      policy.reset();
+      updateStatus(ctx, policy);
+      ctx.ui.notify("Session overrides cleared. Bash uses saved defaults again.", "info");
+
+      return;
+    case "edit": {
+      if (!ctx.hasUI)
+        throw new Error(
+          "/sandbox edit requires a UI. Editing the config file directly changes saved defaults.",
+        );
+
+      const text =
+        scope === "persist"
+          ? existsSync(path)
+            ? readFileSync(path, "utf8")
+            : serializeConfig(defaultConfig())
+          : serializeConfig(policy.read());
+
+      const edited = await ctx.ui.editor(
+        `MXC bash sandbox policy (${scope === "persist" ? "saved defaults" : "session only"})`,
+        text,
+      );
 
       if (edited === undefined) return;
 
-      writeConfig(parseConfig(edited));
+      const config = parseConfig(edited);
+
+      if (scope === "persist") writeConfig(config);
+      else
+        policy.update({
+          scope,
+          cwd: ctx.cwd,
+          mutate: (current) => {
+            Object.assign(current, config);
+
+            if (config.inheritHostPath === undefined) delete current.inheritHostPath;
+          },
+        });
       break;
     }
 
     case "on":
     case "off": {
-      const config = readConfig();
-
-      config.enabled = action === "on";
-      writeConfig(config);
+      policy.update({
+        scope,
+        cwd: ctx.cwd,
+        mutate: (config) => {
+          config.enabled = action === "on";
+        },
+      });
       break;
     }
 
@@ -110,15 +184,22 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext): Promis
       if (!entry)
         throw new Error("Supply a path after the list name. Paths are literal, not globs.");
 
-      const config = readConfig();
-      const paths = pathList(config, listName);
-      const index = paths.indexOf(entry);
+      policy.update({
+        scope,
+        cwd: ctx.cwd,
+        mutate(config) {
+          const paths = pathList(config, listName);
 
-      if (action === "add" && index < 0) paths.push(entry);
+          const index =
+            scope === "session"
+              ? paths.findIndex((path) => expandPath(path, ctx.cwd) === expandPath(entry, ctx.cwd))
+              : paths.indexOf(entry);
 
-      if (action === "remove" && index >= 0) paths.splice(index, 1);
+          if (action === "add" && index < 0) paths.push(entry);
 
-      writeConfig(config);
+          if (action === "remove" && index >= 0) paths.splice(index, 1);
+        },
+      });
       break;
     }
 
@@ -129,10 +210,13 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext): Promis
         throw new Error("Usage: /sandbox network <allow | deny>");
       }
 
-      const config = readConfig();
-
-      config.network.egress = access;
-      writeConfig(config);
+      policy.update({
+        scope,
+        cwd: ctx.cwd,
+        mutate: (config) => {
+          config.network.egress = access;
+        },
+      });
       break;
     }
 
@@ -140,15 +224,22 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext): Promis
       throw new Error(HELP);
   }
 
-  updateStatus(ctx);
-  ctx.ui.notify(`Saved ${path}. Applies to the next bash command.`, "info");
+  updateStatus(ctx, policy);
+  ctx.ui.notify(
+    scope === "persist"
+      ? `Saved defaults at ${path}. Session overrides still apply until reset.`
+      : "Changed this session only. Nothing was saved. Use --persist before the action to change saved defaults.",
+    "info",
+  );
 }
 
 export default function mxc(pi: ExtensionAPI): void {
+  const policy = new SandboxPolicy();
+
   pi.registerTool({
     ...createBashToolDefinition(process.cwd()),
     async execute(id, params, signal, onUpdate, ctx) {
-      const config = readConfig();
+      const config = policy.read();
 
       const tool = config.enabled
         ? createBashToolDefinition(ctx.cwd, {
@@ -162,14 +253,25 @@ export default function mxc(pi: ExtensionAPI): void {
   });
 
   pi.on("user_bash", () => {
-    const config = readConfig();
+    const config = policy.read();
 
     if (!config.enabled) return;
 
     return { operations: createSandboxOperations({ config, backend: checkBackend(config) }) };
   });
 
-  pi.on("session_start", (_event, ctx) => updateStatus(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    policy.reset();
+
+    if (ctx.mode === "tui") {
+      ctx.ui.setFooter((tui, theme, footerData) => ({
+        ...createFooter(ctx, pi, theme, footerData),
+        dispose: footerData.onBranchChange(() => tui.requestRender()),
+      }));
+    }
+
+    updateStatus(ctx, policy);
+  });
 
   pi.registerCommand("sandbox", {
     description: "Configure MXC bash sandboxing. /sandbox help lists commands.",
@@ -185,17 +287,25 @@ export default function mxc(pi: ExtensionAPI): void {
         "add",
         "remove",
         "network",
+        "reset",
+        "--persist",
       ];
 
-      const items = commands.flatMap((command) =>
-        command.startsWith(prefix) ? [{ value: command, label: command }] : [],
+      const persistent = prefix.startsWith("--persist ");
+      const input = persistent ? prefix.slice("--persist ".length) : prefix;
+      const candidates = persistent ? PERSISTENT_ACTIONS : commands;
+
+      const items = candidates.flatMap((command) =>
+        command.startsWith(input)
+          ? [{ value: `${persistent ? "--persist " : ""}${command}`, label: command }]
+          : [],
       );
 
       return items.length > 0 ? items : null;
     },
     async handler(args, ctx) {
       try {
-        await handleCommand(args || "status", ctx);
+        await handleCommand(args || "status", ctx, policy);
       } catch (error) {
         ctx.ui.notify(String(error), "error");
       }

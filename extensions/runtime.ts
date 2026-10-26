@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { finished } from "node:stream/promises";
 
 import { getAgentDir, type BashOperations } from "@earendil-works/pi-coding-agent";
@@ -11,7 +11,8 @@ import {
   type MxcProcess,
 } from "@microsoft/mxc-sdk/v1";
 
-import { getConfigPath, type SandboxConfig } from "./config.js";
+import { expandPath, getConfigPath, type SandboxConfig } from "./config.js";
+import { getToolPolicy } from "./tools.js";
 
 export type SandboxBackend = Exclude<SandboxConfig["backend"], "auto">;
 
@@ -50,16 +51,6 @@ export function checkBackend(config: SandboxConfig): SandboxBackend {
   return backend;
 }
 
-function expandPath(path: string, cwd: string): string {
-  if (path === "~") return homedir();
-
-  if (path.startsWith("~/") || path.startsWith("~\\")) return join(homedir(), path.slice(2));
-
-  if (isAbsolute(path)) return path;
-
-  return resolve(cwd, path);
-}
-
 function quoteArgument(argument: string): string {
   if (process.platform === "win32") {
     return `"${argument.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
@@ -92,6 +83,7 @@ export function buildRequest({
     throw new Error("Sandbox timeout must be positive and finite.");
   }
 
+  const tools = getToolPolicy(config);
   const deniedPaths = config.filesystem.deniedPaths.map((path) => expandPath(path, cwd));
 
   deniedPaths.push(getConfigPath(), join(getAgentDir(), "auth.json"));
@@ -102,7 +94,10 @@ export function buildRequest({
     containment: { type: backend },
     timeoutMs: Math.ceil(timeoutMs),
     filesystem: {
-      readonlyPaths: config.filesystem.readonlyPaths.map((path) => expandPath(path, cwd)),
+      readonlyPaths: [
+        ...config.filesystem.readonlyPaths.map((path) => expandPath(path, cwd)),
+        ...tools.readonlyPaths,
+      ],
       readwritePaths: [
         ...config.filesystem.readwritePaths.map((path) => expandPath(path, cwd)),
         temporaryDirectory,
@@ -115,6 +110,7 @@ export function buildRequest({
     },
     ui: { disable: true, clipboard: "none", allowInputInjection: false },
     environment: {
+      ...tools.environment,
       HOME: homedir(),
       TMPDIR: temporaryDirectory,
       TMP: temporaryDirectory,
